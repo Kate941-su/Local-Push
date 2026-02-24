@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<!-- @author Cursor -->
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Push</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; background: #fff; }
+        .header { padding: 15px; font-size: 24px; font-weight: bold; border-bottom: 1px solid #eee; color: #333; }
+        .setup { padding: 15px; background: #fbfbfb; border-bottom: 1px solid #eee; font-size: 14px; }
+        #chat-box { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+        .message { max-width: 75%; padding: 10px 15px; border-radius: 20px; word-wrap: break-word; font-size: 15px; }
+        .my-msg { background: #fce16d; align-self: flex-start; border-bottom-left-radius: 5px; } /* 送信側（画像の黄色） */
+        .peer-msg { background: #f1f1f1; align-self: flex-end; border-bottom-right-radius: 5px; } /* 受信側（グレー） */        
+        .message img, .message video { max-width: 220px; border-radius: 10px; display: block; }
+        .message audio { width: 220px; display: block; }
+        .download-btn { margin-top: 8px; padding: 6px 10px; border: 1px solid #ccc; border-radius: 8px; background: #fff; cursor: pointer; font-size: 12px; }
+        .transfer-indicator { margin-top: 6px; color: #666; font-size: 12px; min-height: 16px; }
+        .input-area { padding: 15px; border-top: 1px solid #eee; display: flex; gap: 10px; align-items: center; }
+        input[type="text"] { flex: 1; padding: 12px 15px; border: 1px solid #e0e0e0; border-radius: 25px; outline: none; font-size: 15px; }
+        .send-btn { background: #fce16d; color: #333; border: none; width: 45px; height: 45px; border-radius: 50%; cursor: pointer; font-size: 20px; display: flex; align-items: center; justify-content: center; font-weight: bold; }
+        .copy-btn { font-size: 12px; cursor: pointer; color: #007bff; text-decoration: underline; margin-left: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="header">Push</div>
+
+    <div class="setup">
+        <div>あなたのID: <b id="my-id">生成中...</b> <span class="copy-btn" onclick="copyMyId()">[コピー]</span></div>
+        <div style="margin-top: 8px;">サーバーIP: <b id="server-ip">取得中...</b></div>
+        <div style="margin-top: 10px; display: flex; gap: 5px;">
+            <input type="text" id="target-id" placeholder="相手のIDを貼り付け" style="padding: 8px; border-radius: 5px; flex: 1; border: 1px solid #ccc;">
+            <button onclick="connectToPeer()" style="padding: 8px 15px; border-radius: 5px; border: none; background: #eee; cursor: pointer;">接続</button>
+        </div>
+        <div id="status" style="color: #666; margin-top: 10px; font-size: 12px;">状態: 未接続</div>
+        <div id="sending-indicator" class="transfer-indicator"></div>
+    </div>
+
+    <div id="chat-box"></div>
+
+    <div class="input-area">
+        <button class="send-btn" onclick="openMediaPicker()">+</button>
+        <input type="text" id="msg-input" placeholder="Type your message...">
+    </div>
+    <input id="media-input" type="file" accept="*/*" style="display: none;">
+
+<script>
+    const CHUNK_SIZE = 64 * 1024;
+    const incomingMediaTransfers = new Map();
+    const transferIndicatorTimers = new Map();
+
+    // 1. ランダムな4桁の数字（1000〜9999）を生成してIDに設定
+    const randomId = Math.floor(1000 + Math.random() * 9000).toString();
+    const peer = new Peer(randomId);
+    let currentConn = null;
+
+    // 自分のIDが生成されたら画面に表示
+    peer.on('open', (id) => {
+        document.getElementById('my-id').innerText = id;
+    });
+
+    async function loadServerIp() {
+        const serverIpEl = document.getElementById('server-ip');
+        try {
+            const response = await fetch('/server-info');
+            if (!response.ok) throw new Error('failed to fetch server info');
+            const info = await response.json();
+            serverIpEl.innerText = `${info.local_ip}:${info.port}`;
+        } catch (error) {
+            serverIpEl.innerText = '取得失敗';
+        }
+    }
+
+    loadServerIp();
+
+    // 2. 端末Aの挙動: 相手からの接続を待機・受信
+    peer.on('connection', (conn) => {
+        setupConnection(conn);
+    });
+
+    // 3. 端末Bの挙動: 相手のIDを指定して接続
+    function connectToPeer() {
+        const targetId = document.getElementById('target-id').value.trim();
+        if(!targetId) return;
+        const conn = peer.connect(targetId);
+        setupConnection(conn);
+    }
+
+    // 接続が確立した後の共通処理（テキストの送受信）
+    function setupConnection(conn) {
+        currentConn = conn;
+        conn.on('open', () => {
+            document.getElementById('status').innerText = '状態: 接続完了！ (ID: ' + conn.peer + ')';
+            document.getElementById('status').style.color = 'green';
+        });
+
+        // メッセージを受信した時
+        conn.on('data', (data) => {
+            if (data && typeof data === 'object' && data.kind === 'media-start') {
+                const progressUi = createReceivingProgressBubble(data.name);
+                incomingMediaTransfers.set(data.transferId, {
+                    name: data.name,
+                    mimeType: data.mimeType,
+                    totalChunks: data.totalChunks,
+                    chunks: new Array(data.totalChunks),
+                    received: 0,
+                    progressWrap: progressUi.wrap,
+                    progressText: progressUi.progressText,
+                });
+                return;
+            }
+
+            if (data && typeof data === 'object' && data.kind === 'media-chunk') {
+                const transfer = incomingMediaTransfers.get(data.transferId);
+                if (!transfer) return;
+                if (typeof data.index !== 'number' || data.index < 0 || data.index >= transfer.totalChunks) return;
+                if (typeof transfer.chunks[data.index] !== 'string') {
+                    transfer.chunks[data.index] = String(data.chunk);
+                    transfer.received += 1;
+                    updateReceivingProgress(transfer);
+                }
+
+                if (transfer.received === transfer.totalChunks) {
+                    const payload = {
+                        kind: 'media',
+                        name: transfer.name,
+                        mimeType: transfer.mimeType,
+                        dataUrl: transfer.chunks.join(''),
+                    };
+                    incomingMediaTransfers.delete(data.transferId);
+                    if (transfer.progressWrap) {
+                        transfer.progressWrap.remove();
+                    }
+                    handleReceivedMedia(payload);
+                }
+                return;
+            }
+
+            if (data && typeof data === 'object' && data.kind === 'media') {
+                handleReceivedMedia(data);
+                return;
+            }
+            addMessage(String(data), 'peer-msg');
+        });
+        
+        // 接続が切れた時
+        conn.on('close', () => {
+            document.getElementById('status').innerText = '状態: 切断されました';
+            document.getElementById('status').style.color = 'red';
+            setTransferIndicator('sending-indicator', '', false);
+        });
+    }
+
+    function setTransferIndicator(elementId, label, active) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+
+        if (!active) {
+            if (transferIndicatorTimers.has(elementId)) {
+                clearInterval(transferIndicatorTimers.get(elementId));
+                transferIndicatorTimers.delete(elementId);
+            }
+            el.innerText = '';
+            return;
+        }
+
+        if (transferIndicatorTimers.has(elementId)) {
+            clearInterval(transferIndicatorTimers.get(elementId));
+            transferIndicatorTimers.delete(elementId);
+        }
+
+        let dots = 1;
+        el.innerText = `${label}.`;
+        const timer = setInterval(() => {
+            dots = (dots % 3) + 1;
+            el.innerText = `${label}${'.'.repeat(dots)}`;
+        }, 350);
+        transferIndicatorTimers.set(elementId, timer);
+    }
+
+    function normalizeMimeType(file) {
+        const mimeType = (file.type || '').trim();
+        if (mimeType) return mimeType;
+        return 'application/octet-stream';
+    }
+
+    function isPreviewableMedia(mimeType) {
+        return mimeType.startsWith('image/') || mimeType.startsWith('video/') || mimeType.startsWith('audio/');
+    }
+
+    function createReceivingProgressBubble(fileName) {
+        const box = document.getElementById('chat-box');
+        const wrap = document.createElement('div');
+        wrap.className = 'message peer-msg';
+
+        const caption = document.createElement('div');
+        caption.style.fontSize = '12px';
+        caption.style.marginBottom = '6px';
+        caption.innerText = fileName;
+        wrap.appendChild(caption);
+
+        const progressText = document.createElement('div');
+        progressText.innerText = '受信中... 0%';
+        wrap.appendChild(progressText);
+
+        box.appendChild(wrap);
+        box.scrollTop = box.scrollHeight;
+        return { wrap, progressText };
+    }
+
+    function updateReceivingProgress(transfer) {
+        if (!transfer.progressText || transfer.totalChunks <= 0) return;
+        const percent = Math.min(100, Math.floor((transfer.received / transfer.totalChunks) * 100));
+        transfer.progressText.innerText = `受信中... ${percent}%`;
+    }
+
+    // 4. メッセージを送信する処理
+    function sendMessage() {
+        if (!currentConn || !currentConn.open) {
+            alert('先に相手のIDを入力して「接続」を押してください');
+            return;
+        }
+        const input = document.getElementById('msg-input');
+        const msg = input.value;
+        if(!msg) return;
+
+        // P2Pで相手に直接データを送信
+        currentConn.send(msg);
+        
+        // 自分の画面（黄色い吹き出し）に表示
+        addMessage(msg, 'my-msg');
+        input.value = ''; // 入力欄をクリア
+    }
+
+    function openMediaPicker() {
+        if (!currentConn || !currentConn.open) {
+            alert('先に相手のIDを入力して「接続」を押してください');
+            return;
+        }
+        document.getElementById('media-input').click();
+    }
+
+    function sendMediaFile(file) {
+        if (!currentConn || !currentConn.open) {
+            alert('接続されていません');
+            return;
+        }
+        if (file.size > 100 * 1024 * 1024) {
+            alert('100MB以下のファイルを選択してください');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = async () => {
+            const mimeType = normalizeMimeType(file);
+            const payload = {
+                kind: 'media',
+                name: file.name,
+                mimeType,
+                dataUrl: String(reader.result),
+            };
+
+            try {
+                await sendMediaInChunks(payload);
+                addMediaMessage(payload, 'my-msg');
+            } finally {
+                setTransferIndicator('sending-indicator', '', false);
+            }
+        };
+        reader.onerror = () => {
+            setTransferIndicator('sending-indicator', '', false);
+            alert('ファイルの読み込みに失敗しました');
+        };
+        setTransferIndicator('sending-indicator', '送信中', true);
+        reader.readAsDataURL(file);
+    }
+
+    async function sendMediaInChunks(payload) {
+        if (!currentConn || !currentConn.open) return;
+
+        const transferId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const totalChunks = Math.ceil(payload.dataUrl.length / CHUNK_SIZE);
+
+        currentConn.send({
+            kind: 'media-start',
+            transferId,
+            name: payload.name,
+            mimeType: payload.mimeType,
+            totalChunks,
+        });
+
+        for (let index = 0; index < totalChunks; index += 1) {
+            const start = index * CHUNK_SIZE;
+            const end = start + CHUNK_SIZE;
+            const chunk = payload.dataUrl.slice(start, end);
+            currentConn.send({
+                kind: 'media-chunk',
+                transferId,
+                index,
+                chunk,
+            });
+
+            // Yield periodically so large transfers don't freeze the UI.
+            if (index % 8 === 0) {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+        }
+    }
+
+    function dataUrlToBlob(dataUrl) {
+        const marker = ';base64,';
+        const markerIndex = dataUrl.indexOf(marker);
+        if (markerIndex < 0) {
+            throw new Error('invalid data url');
+        }
+
+        const mimeType = dataUrl.slice(5, markerIndex);
+        const base64Data = dataUrl.slice(markerIndex + marker.length);
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i += 1) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: mimeType });
+    }
+
+    async function downloadReceivedMedia(payload) {
+        const blob = dataUrlToBlob(payload.dataUrl);
+        const normalizedMimeType = payload.mimeType || 'application/octet-stream';
+        const fileExt = payload.name.includes('.') ? `.${payload.name.split('.').pop()}` : '.bin';
+
+        // Try save dialog first (shows explorer and lets user choose path).
+        if ('showSaveFilePicker' in window) {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: payload.name,
+                    types: [{
+                        description: 'Media file',
+                        accept: {
+                            [normalizedMimeType]: [fileExt],
+                        },
+                    }],
+                });
+                const writable = await handle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                return true;
+            } catch (error) {
+                // Fall back to browser default download behavior.
+            }
+        }
+
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = payload.name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+        return false;
+    }
+
+    async function handleReceivedMedia(payload) {
+        addMediaMessage(payload, 'peer-msg', true);
+    }
+
+    // 画面にチャットの吹き出しを追加する関数
+    function addMessage(text, className) {
+        const box = document.getElementById('chat-box');
+        const el = document.createElement('div');
+        el.className = 'message ' + className;
+        el.innerText = text;
+        box.appendChild(el);
+        box.scrollTop = box.scrollHeight; // 一番下にスクロール
+    }
+
+    function addMediaMessage(payload, className, withDownloadButton = false) {
+        const box = document.getElementById('chat-box');
+        const wrap = document.createElement('div');
+        wrap.className = 'message ' + className;
+
+        const caption = document.createElement('div');
+        caption.style.fontSize = '12px';
+        caption.style.marginBottom = '6px';
+        caption.innerText = payload.name;
+        wrap.appendChild(caption);
+
+        if (isPreviewableMedia(payload.mimeType) && payload.mimeType.startsWith('image/')) {
+            const img = document.createElement('img');
+            img.src = payload.dataUrl;
+            img.alt = payload.name;
+            wrap.appendChild(img);
+        } else if (isPreviewableMedia(payload.mimeType) && payload.mimeType.startsWith('video/')) {
+            const video = document.createElement('video');
+            video.src = payload.dataUrl;
+            video.controls = true;
+            wrap.appendChild(video);
+        } else if (isPreviewableMedia(payload.mimeType) && payload.mimeType.startsWith('audio/')) {
+            const audio = document.createElement('audio');
+            audio.src = payload.dataUrl;
+            audio.controls = true;
+            wrap.appendChild(audio);
+        } else {
+            const unsupported = document.createElement('div');
+            unsupported.style.fontSize = '12px';
+            unsupported.style.color = '#666';
+            unsupported.innerText = 'プレビュー非対応のファイルです';
+            wrap.appendChild(unsupported);
+        }
+
+        if (withDownloadButton) {
+            const button = document.createElement('button');
+            button.className = 'download-btn';
+            button.innerText = 'ダウンロード';
+            button.addEventListener('click', async () => {
+                button.disabled = true;
+                button.innerText = '保存中...';
+                try {
+                    const savedByPicker = await downloadReceivedMedia(payload);
+                    button.innerText = savedByPicker ? '保存しました' : 'ダウンロードしました';
+                } catch (error) {
+                    button.innerText = '失敗しました';
+                } finally {
+                    setTimeout(() => {
+                        button.disabled = false;
+                        button.innerText = 'ダウンロード';
+                    }, 1500);
+                }
+            });
+            wrap.appendChild(button);
+        }
+
+        box.appendChild(wrap);
+        box.scrollTop = box.scrollHeight;
+    }
+
+    // IDをクリップボードにコピー（利便性のため）
+    function copyMyId() {
+        const id = document.getElementById('my-id').innerText;
+        navigator.clipboard.writeText(id);
+        alert('IDをコピーしました！相手に教えてあげてください。');
+    }
+
+    // Enterキーで送信できるようにする
+    document.getElementById('msg-input').addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') {
+            sendMessage();
+        }
+    });
+
+    document.getElementById('media-input').addEventListener('change', function (e) {
+        const file = e.target.files && e.target.files[0];
+        if (file) {
+            sendMediaFile(file);
+        }
+        e.target.value = '';
+    });
+</script>
+</body>
+</html>

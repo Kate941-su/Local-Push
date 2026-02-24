@@ -1,0 +1,2 @@
+# This project uses only Python standard library modules.
+# Create and activate a virtual environment before running main.py.
