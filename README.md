@@ -1,20 +1,14 @@
 # LocalPush
 
-@author Cursor
+Inspired by 
+- [nowpush](https://github.com/nowpush/nowpush-node)
+- [LocalSend](https://localsend.org/)
 
-## Screenshots / スクリーンショット / Screenshots (DE)
+## Screenshots / スクリーンショット /
 
-### Main View
-![Main View](images/page1.png)
-
-### Chat and Connection
-![Chat and Connection](images/page2.png)
-
-### Transfer Progress
-![Transfer Progress](images/page3.png)
-
-### Download Flow
-![Download Flow](images/page4.png)
+| Main View | Chat and Connection | Transfer Progress | Download Flow |
+|---|---|---|---|
+| ![Main View](images/page1.png) | ![Chat and Connection](images/page2.png) | ![Transfer Progress](images/page3.png) | ![Download Flow](images/page4.png) |
 
 ## 日本語
 
