@@ -10,6 +10,12 @@ Inspired by
 |---|---|---|---|
 | ![Main View](images/page1.png) | ![Chat and Connection](images/page2.png) | ![Transfer Progress](images/page3.png) | ![Download Flow](images/page4.png) |
 
+## PWA Install
+
+- 日本語: スマホのブラウザで開き、「ホーム画面に追加」を実行してください。
+- English: Open in a mobile browser and use "Add to Home Screen".
+- Deutsch: Im mobilen Browser öffnen und "Zum Home-Bildschirm hinzufügen" ausführen.
+
 ## 日本語
 
 ### 概要

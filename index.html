@@ -4,6 +4,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#fce16d">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="LocalPush">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="1024x1024" href="/icons/icon-1024.png">
+    <link rel="shortcut icon" href="/icons/icon-1024.png">
     <title>P2P Push</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
@@ -16,17 +24,19 @@
         .peer-msg { background: #f1f1f1; align-self: flex-start; border-bottom-left-radius: 5px; } /* 受信側（グレー） */        
         .message img, .message video { max-width: 220px; border-radius: 10px; display: block; }
         .message audio { width: 220px; display: block; }
+        .message a { color: #007bff; text-decoration: underline; }
         .download-btn { margin-top: 8px; padding: 6px 10px; border: 1px solid #ccc; border-radius: 8px; background: #fff; cursor: pointer; font-size: 12px; }
         .transfer-indicator { margin-top: 6px; color: #666; font-size: 12px; min-height: 16px; }
         .input-area { padding: 15px; border-top: 1px solid #eee; display: flex; gap: 10px; align-items: center; }
         input[type="text"] { flex: 1; padding: 12px 15px; border: 1px solid #e0e0e0; border-radius: 25px; outline: none; font-size: 15px; }
         .send-btn { background: #fce16d; color: #333; border: none; width: 45px; height: 45px; border-radius: 50%; cursor: pointer; font-size: 20px; display: flex; align-items: center; justify-content: center; font-weight: bold; }
+        .text-send-btn { background: #fce16d; color: #333; border: none; height: 45px; padding: 0 14px; border-radius: 22px; cursor: pointer; font-size: 14px; font-weight: 600; }
         .copy-btn { font-size: 12px; cursor: pointer; color: #007bff; text-decoration: underline; margin-left: 10px; }
     </style>
 </head>
 <body>
 
-    <div class="header">Push</div>
+    <div class="header">LocalPush</div>
 
     <div class="setup">
         <div>あなたのID: <b id="my-id">生成中...</b> <span class="copy-btn" onclick="copyMyId()">[コピー]</span></div>
@@ -44,6 +54,7 @@
     <div class="input-area">
         <button class="send-btn" onclick="openMediaPicker()">+</button>
         <input type="text" id="msg-input" placeholder="Type your message...">
+        <button class="text-send-btn" onclick="sendMessage()">送信</button>
     </div>
     <input id="media-input" type="file" accept="*/*" style="display: none;">
 
@@ -75,6 +86,14 @@
     }
 
     loadServerIp();
+
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/service-worker.js').catch(() => {
+                // Ignore registration errors to keep app usable.
+            });
+        });
+    }
 
     // 2. 端末Aの挙動: 相手からの接続を待機・受信
     peer.on('connection', (conn) => {
@@ -455,12 +474,43 @@
         addMediaMessage(payload, 'peer-msg', true);
     }
 
+    function appendLinkifiedText(container, text) {
+        const urlPattern = /(https?:\/\/[^\s]+|www\.[^\s]+)/g;
+        let lastIndex = 0;
+        let match = null;
+
+        while ((match = urlPattern.exec(text)) !== null) {
+            const start = match.index;
+            const end = urlPattern.lastIndex;
+
+            if (start > lastIndex) {
+                container.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+            }
+
+            const rawUrl = match[0];
+            const href = rawUrl.startsWith("www.") ? `https://${rawUrl}` : rawUrl;
+            const anchor = document.createElement("a");
+            anchor.href = href;
+            anchor.target = "_blank";
+            anchor.rel = "noopener noreferrer";
+            anchor.innerText = rawUrl;
+            container.appendChild(anchor);
+
+            lastIndex = end;
+        }
+
+        if (lastIndex < text.length) {
+            container.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+    }
+
     // 画面にチャットの吹き出しを追加する関数
     function addMessage(text, className) {
         const box = document.getElementById('chat-box');
         const el = document.createElement('div');
         el.className = 'message ' + className;
-        el.innerText = text;
+        el.style.whiteSpace = 'pre-wrap';
+        appendLinkifiedText(el, String(text));
         box.appendChild(el);
         box.scrollTop = box.scrollHeight; // 一番下にスクロール
     }

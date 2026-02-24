@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # @author Cursor
 import json
+import mimetypes
 import socket
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
 HOST = "0.0.0.0"
 PORT = 8888
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 
 def get_local_ip() -> str:

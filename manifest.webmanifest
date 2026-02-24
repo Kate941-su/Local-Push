@@ -1,0 +1,25 @@
+{
+  "name": "LocalPush",
+  "short_name": "LocalPush",
+  "description": "P2P file and message sharing web app",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#fce16d",
+  "author": "@author Cursor",
+  "icons": [
+    {
+      "src": "/icons/icon-1024.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-1024.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
