@@ -12,8 +12,8 @@
         .setup { padding: 15px; background: #fbfbfb; border-bottom: 1px solid #eee; font-size: 14px; }
         #chat-box { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
         .message { max-width: 75%; padding: 10px 15px; border-radius: 20px; word-wrap: break-word; font-size: 15px; }
-        .my-msg { background: #fce16d; align-self: flex-start; border-bottom-left-radius: 5px; } /* 送信側（画像の黄色） */
-        .peer-msg { background: #f1f1f1; align-self: flex-end; border-bottom-right-radius: 5px; } /* 受信側（グレー） */        
+        .my-msg { background: #fce16d; align-self: flex-end; border-bottom-right-radius: 5px; } /* 送信側（画像の黄色） */
+        .peer-msg { background: #f1f1f1; align-self: flex-start; border-bottom-left-radius: 5px; } /* 受信側（グレー） */        
         .message img, .message video { max-width: 220px; border-radius: 10px; display: block; }
         .message audio { width: 220px; display: block; }
         .download-btn { margin-top: 8px; padding: 6px 10px; border: 1px solid #ccc; border-radius: 8px; background: #fff; cursor: pointer; font-size: 12px; }
@@ -107,6 +107,7 @@
                     totalChunks: data.totalChunks,
                     chunks: new Array(data.totalChunks),
                     received: 0,
+                    mode: null,
                     progressWrap: progressUi.wrap,
                     progressText: progressUi.progressText,
                 });
@@ -117,19 +118,37 @@
                 const transfer = incomingMediaTransfers.get(data.transferId);
                 if (!transfer) return;
                 if (typeof data.index !== 'number' || data.index < 0 || data.index >= transfer.totalChunks) return;
-                if (typeof transfer.chunks[data.index] !== 'string') {
-                    transfer.chunks[data.index] = String(data.chunk);
+
+                const normalizedChunk = normalizeReceivedChunk(data.chunk);
+                if (!normalizedChunk) return;
+                if (!transfer.mode) {
+                    transfer.mode = normalizedChunk.mode;
+                }
+                if (transfer.mode !== normalizedChunk.mode) return;
+
+                if (transfer.chunks[data.index] === undefined) {
+                    transfer.chunks[data.index] = normalizedChunk.value;
                     transfer.received += 1;
                     updateReceivingProgress(transfer);
                 }
 
                 if (transfer.received === transfer.totalChunks) {
-                    const payload = {
-                        kind: 'media',
-                        name: transfer.name,
-                        mimeType: transfer.mimeType,
-                        dataUrl: transfer.chunks.join(''),
-                    };
+                    let payload;
+                    if (transfer.mode === 'text') {
+                        payload = {
+                            kind: 'media',
+                            name: transfer.name,
+                            mimeType: transfer.mimeType,
+                            dataUrl: transfer.chunks.join(''),
+                        };
+                    } else {
+                        payload = {
+                            kind: 'media',
+                            name: transfer.name,
+                            mimeType: transfer.mimeType || 'application/octet-stream',
+                            blob: new Blob(transfer.chunks, { type: transfer.mimeType || 'application/octet-stream' }),
+                        };
+                    }
                     incomingMediaTransfers.delete(data.transferId);
                     if (transfer.progressWrap) {
                         transfer.progressWrap.remove();
@@ -191,6 +210,22 @@
         return mimeType.startsWith('image/') || mimeType.startsWith('video/') || mimeType.startsWith('audio/');
     }
 
+    function normalizeReceivedChunk(chunk) {
+        if (chunk instanceof ArrayBuffer) {
+            return { mode: 'binary', value: new Uint8Array(chunk) };
+        }
+        if (ArrayBuffer.isView(chunk)) {
+            return {
+                mode: 'binary',
+                value: new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+            };
+        }
+        if (typeof chunk === 'string') {
+            return { mode: 'text', value: chunk };
+        }
+        return null;
+    }
+
     function createReceivingProgressBubble(fileName) {
         const box = document.getElementById('chat-box');
         const wrap = document.createElement('div');
@@ -211,10 +246,36 @@
         return { wrap, progressText };
     }
 
+    function createSendingProgressBubble(fileName) {
+        const box = document.getElementById('chat-box');
+        const wrap = document.createElement('div');
+        wrap.className = 'message my-msg';
+
+        const caption = document.createElement('div');
+        caption.style.fontSize = '12px';
+        caption.style.marginBottom = '6px';
+        caption.innerText = fileName;
+        wrap.appendChild(caption);
+
+        const progressText = document.createElement('div');
+        progressText.innerText = '送信中... 0%';
+        wrap.appendChild(progressText);
+
+        box.appendChild(wrap);
+        box.scrollTop = box.scrollHeight;
+        return { wrap, progressText };
+    }
+
     function updateReceivingProgress(transfer) {
         if (!transfer.progressText || transfer.totalChunks <= 0) return;
         const percent = Math.min(100, Math.floor((transfer.received / transfer.totalChunks) * 100));
         transfer.progressText.innerText = `受信中... ${percent}%`;
+    }
+
+    function updateSendingProgress(progressText, sentChunks, totalChunks) {
+        if (!progressText || totalChunks <= 0) return;
+        const percent = Math.min(100, Math.floor((sentChunks / totalChunks) * 100));
+        progressText.innerText = `送信中... ${percent}%`;
     }
 
     // 4. メッセージを送信する処理
@@ -248,60 +309,63 @@
             alert('接続されていません');
             return;
         }
-        if (file.size > 100 * 1024 * 1024) {
-            alert('100MB以下のファイルを選択してください');
-            return;
-        }
-
-        const reader = new FileReader();
-        reader.onload = async () => {
-            const mimeType = normalizeMimeType(file);
-            const payload = {
-                kind: 'media',
-                name: file.name,
-                mimeType,
-                dataUrl: String(reader.result),
-            };
-
-            try {
-                await sendMediaInChunks(payload);
-                addMediaMessage(payload, 'my-msg');
-            } finally {
-                setTransferIndicator('sending-indicator', '', false);
-            }
+        const mimeType = normalizeMimeType(file);
+        const payload = {
+            kind: 'media',
+            name: file.name,
+            mimeType,
+            blob: file,
         };
-        reader.onerror = () => {
-            setTransferIndicator('sending-indicator', '', false);
-            alert('ファイルの読み込みに失敗しました');
-        };
+        const sendingUi = createSendingProgressBubble(file.name);
+
         setTransferIndicator('sending-indicator', '送信中', true);
-        reader.readAsDataURL(file);
+        sendMediaInChunks(file, mimeType, (sentChunks, totalChunks) => {
+            updateSendingProgress(sendingUi.progressText, sentChunks, totalChunks);
+        })
+            .then(() => {
+                if (sendingUi.wrap) {
+                    sendingUi.wrap.remove();
+                }
+                addMediaMessage(payload, 'my-msg');
+            })
+            .catch(() => {
+                if (sendingUi.progressText) {
+                    sendingUi.progressText.innerText = '送信失敗';
+                }
+                alert('ファイル送信に失敗しました');
+            })
+            .finally(() => {
+                setTransferIndicator('sending-indicator', '', false);
+            });
     }
 
-    async function sendMediaInChunks(payload) {
+    async function sendMediaInChunks(file, mimeType, onProgress) {
         if (!currentConn || !currentConn.open) return;
 
         const transferId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        const totalChunks = Math.ceil(payload.dataUrl.length / CHUNK_SIZE);
+        const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
 
         currentConn.send({
             kind: 'media-start',
             transferId,
-            name: payload.name,
-            mimeType: payload.mimeType,
+            name: file.name,
+            mimeType,
             totalChunks,
         });
 
         for (let index = 0; index < totalChunks; index += 1) {
             const start = index * CHUNK_SIZE;
-            const end = start + CHUNK_SIZE;
-            const chunk = payload.dataUrl.slice(start, end);
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = await file.slice(start, end).arrayBuffer();
             currentConn.send({
                 kind: 'media-chunk',
                 transferId,
                 index,
                 chunk,
             });
+            if (onProgress) {
+                onProgress(index + 1, totalChunks);
+            }
 
             // Yield periodically so large transfers don't freeze the UI.
             if (index % 8 === 0) {
@@ -327,8 +391,31 @@
         return new Blob([bytes], { type: mimeType });
     }
 
+    function payloadToBlob(payload) {
+        if (payload.blob instanceof Blob) {
+            return payload.blob;
+        }
+        if (typeof payload.dataUrl === 'string') {
+            return dataUrlToBlob(payload.dataUrl);
+        }
+        throw new Error('invalid payload');
+    }
+
+    function getPayloadPreviewSrc(payload) {
+        if (payload.previewSrc) return payload.previewSrc;
+        if (payload.blob instanceof Blob) {
+            payload.previewSrc = URL.createObjectURL(payload.blob);
+            return payload.previewSrc;
+        }
+        if (typeof payload.dataUrl === 'string') {
+            payload.previewSrc = payload.dataUrl;
+            return payload.previewSrc;
+        }
+        return '';
+    }
+
     async function downloadReceivedMedia(payload) {
-        const blob = dataUrlToBlob(payload.dataUrl);
+        const blob = payloadToBlob(payload);
         const normalizedMimeType = payload.mimeType || 'application/octet-stream';
         const fileExt = payload.name.includes('.') ? `.${payload.name.split('.').pop()}` : '.bin';
 
@@ -391,17 +478,17 @@
 
         if (isPreviewableMedia(payload.mimeType) && payload.mimeType.startsWith('image/')) {
             const img = document.createElement('img');
-            img.src = payload.dataUrl;
+            img.src = getPayloadPreviewSrc(payload);
             img.alt = payload.name;
             wrap.appendChild(img);
         } else if (isPreviewableMedia(payload.mimeType) && payload.mimeType.startsWith('video/')) {
             const video = document.createElement('video');
-            video.src = payload.dataUrl;
+            video.src = getPayloadPreviewSrc(payload);
             video.controls = true;
             wrap.appendChild(video);
         } else if (isPreviewableMedia(payload.mimeType) && payload.mimeType.startsWith('audio/')) {
             const audio = document.createElement('audio');
-            audio.src = payload.dataUrl;
+            audio.src = getPayloadPreviewSrc(payload);
             audio.controls = true;
             wrap.appendChild(audio);
         } else {
